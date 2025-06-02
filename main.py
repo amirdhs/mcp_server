@@ -284,50 +284,114 @@ Just type naturally and I'll understand what you want to do!
             logger.error(f"Error processing message: {e}")
             await update.message.reply_text("❌ Sorry, I encountered an error processing your message.")
 
+    async def parse_event_manually(self, message: str) -> str:
+        """Manual parsing fallback for event creation"""
+        try:
+            import re
+            from datetime import datetime, timedelta
+
+            # Default values
+            now = datetime.now()
+            default_start = now.replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            default_end = default_start + timedelta(hours=1)
+
+            # Extract title (everything before time/date keywords)
+            title_match = re.search(r'^(.*?)(?:\s+(?:at|on|tomorrow|today|next|this))', message.lower())
+            title = title_match.group(1).strip() if title_match else message.split()[0:3]
+            if isinstance(title, list):
+                title = ' '.join(title)
+
+            # Simple time parsing
+            time_patterns = [
+                (r'(\d{1,2})\s*(?::|\.)\s*(\d{2})\s*(am|pm)?', 'time_colon'),
+                (r'(\d{1,2})\s*(am|pm)', 'time_ampm'),
+                (r'(\d{1,2})\s*(?:o\'?clock)', 'time_oclock')
+            ]
+
+            start_time = default_start
+            duration = timedelta(hours=1)
+
+            for pattern, type_name in time_patterns:
+                match = re.search(pattern, message.lower())
+                if match:
+                    hour = int(match.group(1))
+                    minute = int(match.group(2)) if type_name == 'time_colon' else 0
+
+                    # Handle AM/PM
+                    if len(match.groups()) >= 3 and match.group(-1):
+                        if match.group(-1).lower() == 'pm' and hour != 12:
+                            hour += 12
+                        elif match.group(-1).lower() == 'am' and hour == 12:
+                            hour = 0
+
+                    # Set the time
+                    start_time = start_time.replace(hour=hour, minute=minute)
+                    break
+
+            # Check for duration
+            duration_match = re.search(r'(\d+)\s*(?:hour|hr)s?', message.lower())
+            if duration_match:
+                duration = timedelta(hours=int(duration_match.group(1)))
+
+            # Check for date keywords
+            if 'today' in message.lower():
+                start_time = now.replace(hour=start_time.hour, minute=start_time.minute, second=0, microsecond=0)
+            elif 'tomorrow' in message.lower():
+                start_time = start_time  # Already set to tomorrow
+            elif 'next week' in message.lower():
+                start_time = start_time + timedelta(days=7)
+
+            end_time = start_time + duration
+
+            # Create event
+            event_data = {
+                'title': title or 'New Event',
+                'start_time': start_time.isoformat(),
+                'end_time': end_time.isoformat(),
+                'description': f'Created from: {message}'
+            }
+
+            result = await self.create_calendar_event(event_data)
+
+            if result.get('success'):
+                return f"✅ **Event Created!**\n\n📅 **{event_data['title']}**\n🕐 {start_time.strftime('%Y-%m-%d %H:%M')} - {end_time.strftime('%H:%M')}\n\n[View Event]({result.get('html_link', '#')})"
+            else:
+                return f"❌ Failed to create event: {result.get('error', 'Unknown error')}"
+
+        except Exception as e:
+            return f"❌ Error parsing event: {str(e)}"
+
     async def analyze_intent(self, message: str) -> Dict[str, Any]:
         """Analyze user message intent using AI"""
-        analysis_prompt = f"""
-Analyze this user message and determine the intent. Return JSON with 'action' and relevant parameters.
-
-Possible actions:
-- search_gmail: Search Gmail (extract query)
-- create_calendar_event: Create calendar event (extract title, date, time)
-- create_task: Create task (extract title, description, due_date)
-- get_calendar: View calendar events
-- get_tasks: View tasks
-- chat: Regular conversation
-
-User message: "{message}"
-
-Return only JSON format like: {{"action": "search_gmail", "query": "from:john@example.com"}}
-"""
-
-        try:
-            ai_response = await self.ai_chat(analysis_prompt, "Intent analysis")
-            response_text = ai_response.get('response', '{}')
-
-            # Try to extract JSON from response
-            import re
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                intent = json.loads(json_match.group())
-                return intent
-        except:
-            pass
-
-        # Fallback to simple keyword matching
         message_lower = message.lower()
 
-        if any(word in message_lower for word in ['email', 'gmail', 'mail', 'inbox']):
+        # Enhanced intent detection
+        gmail_keywords = ['email', 'gmail', 'mail', 'inbox', 'search', 'unread', 'from:', 'subject:']
+        calendar_create_keywords = ['meeting', 'appointment', 'schedule', 'event', 'remind me at', 'book', 'plan']
+        calendar_view_keywords = ['calendar', 'events', 'what\'s on', 'meetings today', 'agenda']
+        task_create_keywords = ['task', 'todo', 'add task', 'reminder', 'remember to', 'need to']
+        task_view_keywords = ['tasks', 'todo list', 'what tasks', 'my tasks']
+
+        # Check for Gmail
+        if any(keyword in message_lower for keyword in gmail_keywords):
             return {'action': 'search_gmail', 'query': message}
-        elif any(word in message_lower for word in ['meeting', 'appointment', 'schedule', 'calendar event']):
-            return {'action': 'create_calendar_event', 'title': message}
-        elif any(word in message_lower for word in ['task', 'todo', 'reminder', 'add']):
-            return {'action': 'create_task', 'title': message}
-        elif 'calendar' in message_lower:
+
+        # Check for calendar event creation
+        elif any(keyword in message_lower for keyword in calendar_create_keywords):
+            return {'action': 'create_calendar_event', 'title': message, 'query': message}
+
+        # Check for calendar viewing
+        elif any(keyword in message_lower for keyword in calendar_view_keywords):
             return {'action': 'get_calendar'}
-        elif 'task' in message_lower:
+
+        # Check for task creation
+        elif any(keyword in message_lower for keyword in task_create_keywords):
+            return {'action': 'create_task', 'title': message}
+
+        # Check for task viewing
+        elif any(keyword in message_lower for keyword in task_view_keywords):
             return {'action': 'get_tasks'}
+
         else:
             return {'action': 'chat'}
 
@@ -354,18 +418,58 @@ Return only JSON format like: {{"action": "search_gmail", "query": "from:john@ex
     async def handle_calendar_creation(self, intent: Dict[str, Any]) -> str:
         """Handle calendar event creation"""
         try:
+            message = intent.get('title', intent.get('query', ''))
+
             # Use AI to extract event details
             ai_prompt = f"""
-Extract event details from: "{intent.get('title', '')}"
-Return JSON with: title, start_time (ISO format), end_time (ISO format), description
-If no specific time mentioned, use next available business hour.
-Current date/time for reference: {datetime.now().isoformat()}
+Extract calendar event details from this message: "{message}"
+
+Current date and time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Return ONLY a JSON object with these fields:
+- title: Event title/subject
+- start_time: Start time in ISO format (YYYY-MM-DDTHH:MM:SS)
+- end_time: End time in ISO format (YYYY-MM-DDTHH:MM:SS)  
+- description: Brief description (optional)
+
+Rules:
+- If no date specified, use tomorrow
+- If no time specified, use 10:00 AM
+- If no duration specified, make it 1 hour
+- Use 24-hour format
+- Return only valid JSON, no other text
+
+Example: {{"title": "Team Meeting", "start_time": "2024-12-07T14:00:00", "end_time": "2024-12-07T15:00:00", "description": "Weekly team sync"}}
 """
 
-            ai_response = await self.ai_chat(ai_prompt, "Event extraction")
-            # For now, create a simple event
+            ai_response = await self.ai_chat(ai_prompt, "Event extraction - return only JSON")
+            response_text = ai_response.get('response', '{}')
 
-            return "📅 Calendar event creation is being processed. Please use more specific details like 'Schedule meeting tomorrow at 2 PM for 1 hour about project review'."
+            # Extract JSON from AI response
+            import re
+            json_match = re.search(r'\{[^}]*\}', response_text, re.DOTALL)
+            if json_match:
+                try:
+                    event_details = json.loads(json_match.group())
+
+                    # Validate required fields
+                    if not all(key in event_details for key in ['title', 'start_time', 'end_time']):
+                        return "❌ Could not parse event details. Please be more specific with date, time, and title."
+
+                    # Create the calendar event
+                    result = await self.create_calendar_event(event_details)
+
+                    if result.get('success'):
+                        return f"✅ **Event Created Successfully!**\n\n📅 **{event_details['title']}**\n🕐 {event_details['start_time']} - {event_details['end_time']}\n\n[View in Google Calendar]({result.get('html_link', '#')})"
+                    else:
+                        return f"❌ Failed to create event: {result.get('error', 'Unknown error')}"
+
+                except json.JSONDecodeError:
+                    pass
+
+            # Fallback to manual parsing if AI fails
+            return await self.parse_event_manually(message)
+
         except Exception as e:
             return f"❌ Error creating calendar event: {str(e)}"
 
