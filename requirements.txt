@@ -1,0 +1,8 @@
+openai~=1.82.0
+requests~=2.32.3
+flask~=3.1.1
+protobuf~=6.31.0
+google-auth-oauthlib~=1.2.2
+google-api-python-client~=2.170.0
+dotenv~=0.9.9
+python-dotenv~=1.1.0
